@@ -4,18 +4,24 @@ import java.awt.image.BufferedImage;
 import java.awt.print.Book;
 import java.awt.print.PageFormat;
 import java.awt.print.Paper;
+import java.awt.print.PrinterException;
 import java.awt.print.PrinterJob;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.ConnectException;
+import java.util.List;
 
 import javax.print.PrintService;
 import javax.print.attribute.standard.Chromaticity;
 import javax.print.attribute.standard.Copies;
 
+import org.apache.http.annotation.Experimental;
+import org.apache.log4j.Logger;
 import org.apache.pdfbox.multipdf.PDFMergerUtility;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -24,14 +30,24 @@ import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException;
 import org.apache.pdfbox.pdmodel.graphics.image.JPEGFactory;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.pdfbox.printing.PDFPageable;
 import org.apache.pdfbox.printing.PDFPrintable;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.docx4j.Docx4J;
 import org.docx4j.openpackaging.exceptions.Docx4JException;
 import org.docx4j.openpackaging.packages.WordprocessingMLPackage;
+import org.ghost4j.Ghostscript;
+import org.ghost4j.GhostscriptException;
 
+import com.artofsolving.jodconverter.DocumentConverter;
+import com.artofsolving.jodconverter.openoffice.connection.OpenOfficeConnection;
+import com.artofsolving.jodconverter.openoffice.connection.SocketOpenOfficeConnection;
+import com.artofsolving.jodconverter.openoffice.converter.OpenOfficeDocumentConverter;
+
+import controller.Controller;
 import javafx.print.PageRange;
+import util.Log;
 
 /**
  * Classe responsável por formatar o documento antes da impressão.
@@ -45,6 +61,7 @@ public class DocPrepare {
 	private PageRange pageRange;
 	private Chromaticity color;
 	
+	static Logger log = Logger.getLogger(DocPrepare.class.getName());
 	/**
 	 * Formata documento para ser impresso, definindo cor da impressão, quantidade de cópias, range de páginas do documento. 
 	 * No momento aceita apenas PDF e tamanho A4.
@@ -55,40 +72,50 @@ public class DocPrepare {
 	 */
 	public DocPrepare(String filePath, PrintService printService, Copies copies, PageRange pageRange, Chromaticity color) throws Exception {
 		
+		//inicializando variáveis
 		this.filePath = filePath;
 		this.copies = copies;
 		this.pageRange = pageRange;
 		this.color = color;		
 		this.printService = printService;
+		log.info(this.toString());
 		
 		//Carregando documento
 		String[] pathArray = this.filePath.split("\\.");
 		if((pathArray.length - 1) <= 0)
 			throw new Exception("Extensão não encontrada");
-		String extension = pathArray[pathArray.length - 1];
+		String extension = pathArray[pathArray.length - 1].toLowerCase();
 		if(extension.equals("pdf"))
 			this.pdfLoad();
 		else if(extension.equals("docx"))
 			this.docLoad();
 		else
 			throw new Exception("Extensão não suportada");
+		Log.docSave(this.doc,"doc1Load.pdf");
 		
-		//Converte documento para escala de cinza
+		//Converte documento para escala de cinza		
 		if(this.color instanceof Chromaticity) {
-			if(this.color.equals(Chromaticity.MONOCHROME))
+			if(this.color.equals(Chromaticity.MONOCHROME)) {
+				//this.gsDocToGray();
 				this.docToGray();
-		}else
+			}
+		}else {
+			//this.gsDocToGray();
 			this.docToGray();
-			
+		}
+		Log.docSave(this.doc,"doc2Gray.pdf");
+				
 		//Recorta documento de acordo com o range
 		if(this.pageRange instanceof PageRange)
 			this.docSplit(this.pageRange.getStartPage(), this.pageRange.getEndPage());
+		Log.docSave(this.doc,"doc3Split.pdf");
 		
 		//Duplica documento de acordo com a quantidade de copias
 		if(this.copies instanceof Copies)
 			this.docCopies(this.copies.getValue());
 		else
 			this.docCopies(1);
+		Log.docSave(this.doc,"doc4Copies.pdf");
 	}
 	
 	public void decodificar() {
@@ -99,20 +126,67 @@ public class DocPrepare {
 		this.doc = PDDocument.load(new File(filePath));
 	}
 	
-	public void docLoad() throws Docx4JException, InvalidPasswordException, IOException {
-		//TODO: Corrigir, não carrega .doc nem .docx
-		InputStream is = new FileInputStream(this.filePath);
-        WordprocessingMLPackage wordMLPackage = WordprocessingMLPackage.load(is);
-        //List sections = wordMLPackage.getDocumentModel().getSections();
-        
-        ByteArrayOutputStream outStream =  new ByteArrayOutputStream();
-		Docx4J.toPDF(wordMLPackage, outStream);
-		ByteArrayInputStream inStream = new ByteArrayInputStream(outStream.toByteArray());
-		PDDocument outDoc = PDDocument.load(inStream);
-		
-		this.doc = outDoc;
+	@Experimental
+	public void docLoadJod() throws IOException {
+		OpenOfficeConnection connection = null;
+	    try {
+	      File inputFile = new File(this.filePath);
+	      String workingDirectory = System.getenv("HOME");
+	      String theFile = workingDirectory + "/PrinterSev/saida.pdf";
+	      File outputFile = new File(theFile);
+
+	      connection = new SocketOpenOfficeConnection(8100);
+	      connection.connect();
+
+	      // convert
+	      DocumentConverter converter = new OpenOfficeDocumentConverter(connection);
+	      converter.convert(inputFile, outputFile);
+	      this.doc = PDDocument.load(new File(theFile));
+	    }
+	    finally {
+	      // close the connection
+	      if (connection.isConnected()) {
+	        connection.disconnect();
+	      }
+	    }
 	}
 	
+	@Experimental
+	public void docLoad() throws Docx4JException, InvalidPasswordException, IOException {
+		//TODO: Corrigir, carrega docx porém gera uma marca na impressão.
+		InputStream is = new FileInputStream(new File(filePath));
+        WordprocessingMLPackage wordMLPackage = WordprocessingMLPackage.load(is);
+        List sections = wordMLPackage.getDocumentModel().getSections();   
+        
+        String workingDirectory = System.getenv("HOME");
+        String theFile = workingDirectory + "/PrinterSev/saida.pdf";        
+        Docx4J.toPDF(wordMLPackage, new FileOutputStream(theFile));
+        
+        this.doc = PDDocument.load(new File(theFile));
+	}
+	
+	public void gsDocToGray() throws IOException, GhostscriptException {
+		String workingDirectory = System.getenv("HOME");
+        String theFile = workingDirectory + "/PrinterSev/saida.pdf";    
+        
+		Ghostscript gs = Ghostscript.getInstance();
+		 
+		String[] gsArgs = new String[9];
+		gsArgs[1] = "-sDEVICE=pdfwrite";
+		gsArgs[2] = "-sProcessColorModel=DeviceGray";
+		gsArgs[3] = "-sColorConversionStrategy=Gray";
+		gsArgs[4] = "-dOverrideICC";
+		gsArgs[5] = "-o";
+		gsArgs[6] = theFile;
+		gsArgs[7] = "-f";
+		gsArgs[8] = this.filePath;
+ 
+        //execute and exit interpreter
+        gs.initialize(gsArgs);
+        gs.exit();
+        this.doc = PDDocument.load(new File(theFile));
+	}
+	@Deprecated
 	public void docToGray() throws IOException {
 		PDFRenderer pdfRenderer = new PDFRenderer(this.doc);
 		PDDocument docOut = new PDDocument();
@@ -163,7 +237,29 @@ public class DocPrepare {
 	public void docResize() {
 		//TODO: Implementar
 	}
+	/**
+	 * Novo método para impressão.
+	 * @throws Exception 
+	 */
+	public void docPrintGS() throws Exception {
+		//Verifica se doc possui páginas
+	    if(this.doc.getNumberOfPages() == 0) {
+	    	throw new Exception("Documento vazio");
+	    }
+	    
+	    //Verifica se existe impressora
+	    if(!(this.printService instanceof PrintService)) {
+	    	throw new Exception("Impressora não encontrada");
+	    }
+	    
+		PrinterJob job = PrinterJob.getPrinterJob();
+	    //PDDocument doc = PDDocument.load(new File(this.doc));
+	    job.setPageable(new PDFPageable(this.doc));
+	    job.setPrintService(this.printService);
+	    job.print();
+	}
 	
+	@Deprecated
 	public void docPrint() throws Exception {
 		//Verifica se doc possui páginas
 	    if(this.doc.getNumberOfPages() == 0) {
@@ -198,5 +294,15 @@ public class DocPrepare {
 	    job.setPrintService(this.printService);
 	    job.setPageable(book);
 		job.print();
+	}
+	
+	@Override
+	public String toString() {
+		return ("DocPrepareConfig = {File Path: "+this.filePath+", \n"+
+				"Copies: "+this.copies+", \n"+
+				"Page Range: "+this.pageRange+", \n"+
+				"Color: "+this.color+", \n"+
+				"PrintService: "+this.printService+"}"
+				);
 	}
 }
